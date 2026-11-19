@@ -194,6 +194,14 @@
       <div class="kpi"><b class="mono" id="kAcc">—</b><span>总正确率</span></div>
     </div>
 
+    <div class="card" style="padding:10px 14px;margin-bottom:12px">
+      <div class="row" style="gap:8px;align-items:center">
+        <input id="bankFilter" placeholder="搜索章节或题目关键词（如 卡诺图 / 第8章 / 免疫）"
+               style="flex:1;min-width:0" autocomplete="off">
+        <span class="muted" id="filterHint" style="font-size:12.5px;white-space:nowrap"></span>
+      </div>
+    </div>
+
     <div id="banks"></div>
 
     <div class="card">
@@ -342,7 +350,11 @@ D. 《万国公报》的创办
       <span class="muted" id="statsHint" style="font-size:12.5px"></span>
     </div>
     <div id="statsBody"></div>
-    <div class="row" style="justify-content:flex-end;margin-top:14px">
+    <div class="row spread" style="margin-top:14px;gap:8px;flex-wrap:wrap">
+      <div class="row" style="gap:8px">
+        <button class="ghost" id="btnExpWrong">导出错题 (txt)</button>
+        <button class="ghost" id="btnExpAll">备份记录 (json)</button>
+      </div>
       <button class="ghost" id="statsClose">关闭</button>
     </div>
   </div>
@@ -709,6 +721,62 @@ function statOf(id){ return store.stat[id] || (store.stat[id]={r:0,w:0}); }
 function pct(r,w){ const n=r+w; return n? Math.round(r*100/n)+'%' : '—'; }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+/* ---- 导出 ---- */
+function downloadText(name, text){
+  const blob = new Blob(['\ufeff' + text], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+}
+function answerText(q){
+  if(q.type==='judge') return q.a===0 ? '正确' : '错误';
+  if(q.type==='multi') return (q.a||[]).map(i=>'ABCDEFGH'[i]).join('');
+  if(q.type==='short') return '（名词解释，见要点）';
+  return 'ABCDEFGH'[q.a] || '—';
+}
+function exportWrong(){
+  const items = ALL.filter(q=>store.wrong[q.id]);
+  if(!items.length){ toast('还没有错题，先去做几道'); return; }
+  const lines = ['错题本 · ' + new Date().toLocaleString('zh-CN'), '共 ' + items.length + ' 道', ''];
+  const byBank = new Map();
+  items.forEach(q=>{ if(!byBank.has(q.bankId)) byBank.set(q.bankId, []); byBank.get(q.bankId).push(q); });
+  byBank.forEach((qs, bid)=>{
+    const b = BANKS.find(x=>x.id===bid);
+    lines.push('════ ' + (b ? b.title : bid) + ' ════');
+    qs.forEach(q=>{
+      lines.push('');
+      lines.push('[' + (catName(q.bankId, q.catId) || '') + ']');
+      lines.push(q.q);
+      (q.opts||[]).forEach((o,i)=>lines.push('  ' + 'ABCDEFGH'[i] + '. ' + o));
+      lines.push('正确答案：' + answerText(q));
+      const rec = store.answers && store.answers[q.id];
+      if(rec && rec.pick !== undefined && rec.pick !== null && rec.pick !== ''){
+        let pick = rec.pick;
+        if(Array.isArray(pick)) pick = pick.map(i=>'ABCDEFGH'[i]).join('');
+        else if(q.type==='judge') pick = pick===0 ? '正确' : '错误';
+        else if(q.type!=='short') pick = 'ABCDEFGH'[pick] || pick;
+        lines.push('你的答案：' + pick);
+      }
+      if(q.exp) lines.push('解析：' + q.exp.replace(/\n/g, ' '));
+    });
+    lines.push('');
+  });
+  downloadText('错题本-' + new Date().toISOString().slice(0,10) + '.txt', lines.join('\n'));
+  toast('已导出 ' + items.length + ' 道错题');
+}
+function exportAll(){
+  const payload = {
+    app: '刷题器', exportedAt: new Date().toISOString(),
+    banks: BANKS.map(b=>({id:b.id, title:b.title})),
+    store: store
+  };
+  downloadText('刷题记录-' + new Date().toISOString().slice(0,10) + '.json', JSON.stringify(payload, null, 1));
+  toast('已导出记录');
+}
+
 /* ---- 一键生成解析（需要本地 quiz-server 提供 /api/explain） ---- */
 let aiReady = false;
 async function genExp(bankId, title){
@@ -844,8 +912,28 @@ function pool(){
   return ALL;
 }
 
+let FILTER_INDEX = [];
+function applyFilter(kw){
+  kw = (kw || '').trim().toLowerCase();
+  let shown = 0, totalQ = 0;
+  document.querySelectorAll('#banks .cat.allcat').forEach(el=>{
+    el.style.display = kw ? 'none' : '';
+  });
+  FILTER_INDEX.forEach(rec=>{
+    const hit = !kw || rec.text.indexOf(kw) >= 0;
+    rec.el.style.display = hit ? '' : 'none';
+    if(hit){ shown++; totalQ += rec.n; }
+  });
+  document.querySelectorAll('#banks .bank').forEach(b=>{
+    const vis = [...b.querySelectorAll('.cat')].some(c=>c.style.display !== 'none');
+    b.style.display = vis ? '' : 'none';
+  });
+  const hint = $('#filterHint');
+  if(hint) hint.textContent = kw ? (shown + ' 个章节 · ' + totalQ + ' 题') : '';
+}
 function renderHome(){
   const wrap = $('#banks'); wrap.innerHTML='';
+  FILTER_INDEX = [];
   let total=0, done=0, r=0, w=0;
   ALL.forEach(q=>{ total++; if(store.seen[q.id]) done++;
     const s=store.stat[q.id]; if(s){ r+=s.r; w+=s.w; } });
@@ -871,6 +959,8 @@ function renderHome(){
       const sw = c.qs.reduce((n,q)=>n+(store.stat[q.id]?store.stat[q.id].w:0),0);
       const sd = c.qs.filter(q=>store.seen[q.id]).length;
       const el = document.createElement('div');
+      FILTER_INDEX.push({el, n: c.qs.length, qs: c.qs,
+        text: (c.name + ' ' + b.title + ' ' + c.qs.map(q=>q.q + ' ' + (q.tag||'') + ' ' + (q.exp||'').slice(0,300)).join(' ')).toLowerCase()});
       el.className='cat' + (scope.catId===c.id && scope.bankId===b.id ?' on':'');
       el.innerHTML = '<div style="flex:1"><b>'+esc(c.name)+'</b>'+
         '<div class="muted" style="font-size:12.5px">'+esc(c.desc||'')+'</div>'+
@@ -882,7 +972,7 @@ function renderHome(){
     });
 
     const allC = document.createElement('div');
-    allC.className='cat'+(scope.bankId===b.id && !scope.catId?' on':'');
+    allC.className='cat allcat'+(scope.bankId===b.id && !scope.catId?' on':'');
     allC.innerHTML = '<div style="flex:1"><b>全部（混合）</b>'+
       '<div class="muted" style="font-size:12.5px">本库所有题型随机混合</div></div>'+
       '<div class="meta">'+cnt+' 题</div>';
@@ -912,6 +1002,14 @@ function renderHome(){
       rebuild(); renderHome(); toast('已删除');
     };
   });
+
+  // 关键词筛选
+  const fEl = $('#bankFilter');
+  if(fEl && !fEl._bound){
+    fEl._bound = true;
+    fEl.addEventListener('input', ()=>applyFilter(fEl.value));
+  }
+  if(fEl && fEl.value) setTimeout(()=>applyFilter(fEl.value), 0);
 
   // 「继续上次」入口
   const rrow = $('#resumeRow');
@@ -2039,6 +2137,8 @@ $('#btnStats').onclick=()=>{
   $('#statsHint').textContent = '共 ' + ALL.length + ' 题 · 已刷 ' + seen + ' 题 · 错题 ' + wrong + ' 道';
   $('#statsModal').classList.remove('hide');
 };
+$('#btnExpWrong').onclick=exportWrong;
+$('#btnExpAll').onclick=exportAll;
 $('#statsClose').onclick=()=>$('#statsModal').classList.add('hide');
 $('#statsModal').onclick=e=>{ if(e.target.id==='statsModal') $('#statsModal').classList.add('hide'); };
 $('#btnReset').onclick=openReset;
